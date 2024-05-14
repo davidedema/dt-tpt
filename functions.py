@@ -198,6 +198,7 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
     top1_post = []
     top5_post = []
     for i, (images, y) in enumerate(validation_loader):
+        print("STEP: ", i)
         assert GPU is not None
         if isinstance(images, list):
             for k in range(len(images)):
@@ -246,3 +247,9 @@ def avg_entropy(outputs):
     min_real = torch.finfo(avg_logits.dtype).min
     avg_logits = torch.clamp(avg_logits, min=min_real)
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1)
+
+
+def report(file, avgtop1, avgtop5):
+    with open(file, "a") as f:
+        f.write(f'Average top 1: {avgtop1} \n')
+        f.write(f'Average top 5: {avgtop5} \n')
