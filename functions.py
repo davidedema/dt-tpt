@@ -236,12 +236,8 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
 
         # measure elapsed time
         progress.display_summary()
-    
-    mean_top1_pre = np.mean(top1_pre)
-    mean_top5_pre = np.mean(top5_pre)
-    mean_top1_post = np.mean(top1_post)
-    mean_top5_post = np.mean(top5_post)
-    return [mean_top1_pre, mean_top5_pre], [mean_top1_post, mean_top5_post]
+
+    return [top1.avg, top5.avg]
 
 # Their implementation
 def avg_entropy(outputs):

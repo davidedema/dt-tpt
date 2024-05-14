@@ -25,7 +25,7 @@ def main():
             model.prompt_learner.ctx.copy_(pretrained_ctx)
             model.prompt_learner.ctx_init_state = pretrained_ctx
     
-    model_state = None # ? CAPIAMO DOPO
+    model_state = None # ? CAPIAMO DOPO -> si potrebbe togliere
 
     for name, param in model.named_parameters():
         if "prompt_learner" not in name:                # Freeze all parameters except the prompt learner 
@@ -70,13 +70,10 @@ def main():
     print("number of test samples: {}".format(len(test_set)))
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=True, num_workers=4)            
 
-    results_pre, results_post = test_time_adaptation(test_loader, model, model_state, optimizer, optim_state, scaler)
+    results = test_time_adaptation(test_loader, model, model_state, optimizer, optim_state, scaler)
     
-    print("Top-1 accuracy PRE: {:.2f}".format(results_pre[0]))
-    print("Top-5 accuracy PRE: {:.2f}".format(results_pre[1]))
-    
-    print("Top-1 accuracy POST: {:.2f}".format(results_post[0]))
-    print("Top-5 accuracy POST: {:.2f}".format(results_post[1]))
+    print("Top-1 accuracy POST: {:.2f}".format(results[0]))
+    print("Top-5 accuracy POST: {:.2f}".format(results[1]))
     
 if __name__ == '__main__':
     main()
