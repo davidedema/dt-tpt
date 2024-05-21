@@ -197,9 +197,7 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
     top1_post = []
     top5_post = []
     for i, (images, y) in enumerate(validation_loader):
-        if i > 3:
-            break
-        print("STEP: ", i)
+        # print("STEP: ", i)
         assert GPU is not None
         if isinstance(images, list):
             for k in range(len(images)):
@@ -208,8 +206,9 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
         else:
             pprint("Error!!!")
         images = torch.cat(images, dim=0)
+        y = y.cuda(GPU, non_blocking=True)
         
-        print("----AFTER TTA----")
+        # print("----AFTER TTA----")
         
         if TTA_STEP > 0:
             with torch.no_grad():
@@ -221,7 +220,6 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
             with torch.cuda.amp.autocast():
                 output = model(image)
         # measure accuracy and record loss
-        y = y.cuda(GPU, non_blocking=True)
         acc1, acc5 = accuracy(output, y, topk=(1, 5))
         top1_post.append(acc1[0])
         top5_post.append(acc5[0])
@@ -229,7 +227,8 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
         top5.update(acc5[0], images.size(0))
 
         # measure elapsed time
-        progress.display_summary()
+        progress.display(i)
+    progress.display_summary()
 
     return [top1.avg, top5.avg]
 

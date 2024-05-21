@@ -248,20 +248,23 @@ class OurCLIP(nn.Module):
         # clip_model = clip_model.cpu()
         clip_model = clip_model.float()
         self.prompt_learner = PromptLearner(clip_model, classnames, n_ctx=n_ctx, ctx_init=ctx_init, ctx_position=class_token_position)
-        self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.image_encoder = clip_model.visual
         self.text_encoder = TextEncoder(clip_model)
-        self.logit_scale = clip_model.logit_scale
+        self.logit_scale = clip_model.logit_scale.data
 
     def forward(self, image):
-        image_features = self.image_encoder(image)
+        text_features = []
+        with torch.no_grad():
+            image_features = self.image_encoder(image)
         prompts = self.prompt_learner()
-        tokenized_prompts = self.tokenized_prompts
+        tokenized_prompts = self.prompt_learner.tokenized_prompts
         
-        text_features = self.text_encoder(prompts, tokenized_prompts)
+        t_features = self.text_encoder(prompts, tokenized_prompts)
+        text_features.append(t_features / t_features.norm(dim=-1,keepdim=True))
+        text_features = torch.stack(text_features,dim=0)
 
+        text_features = torch.mean(text_features,dim=0)
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         logit_scale = self.logit_scale.exp()
         logits = logit_scale * image_features @ text_features.t()
