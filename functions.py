@@ -3,7 +3,8 @@ import numpy as np
 from enum import Enum
 import torch
 from pprint import pprint
-
+import os
+from os import listdir
 
 ARCHITECTURE = "RN50"
 
@@ -167,7 +168,7 @@ def test_time_tuning(model, inputs, optimizer, scaler):
             if selected_idx is not None:
                 output = output[selected_idx]
             else:
-                output, selected_idx = calculate_entropy(output, 4)
+                output, selected_idx = calculate_entropy(output, 0.1)
 
             loss = avg_entropy(output)
         
@@ -196,6 +197,8 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
     top1_post = []
     top5_post = []
     for i, (images, y) in enumerate(validation_loader):
+        if i > 3:
+            break
         print("STEP: ", i)
         assert GPU is not None
         if isinstance(images, list):
@@ -239,7 +242,21 @@ def avg_entropy(outputs):
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1)
 
 
-def report(file, avgtop1, avgtop5):
-    with open(file, "a") as f:
-        f.write(f'Average top 1: {avgtop1} \n')
-        f.write(f'Average top 5: {avgtop5} \n')
+def report(avgtop1, avgtop5):
+
+    results_dir = 'reports'
+    test_folder_name = 'test0'
+    i = 0
+    while os.path.exists(os.path.join(results_dir, test_folder_name)):
+        i += 1
+        test_folder_name = f'test{i}'
+
+    new_test_dir = os.path.join(results_dir, test_folder_name)
+    os.makedirs(new_test_dir)
+
+    results_path = os.path.join(new_test_dir, 'report.txt')
+
+    results = f'Average top 1: {avgtop1} \n' + f'Average top 5: {avgtop5} \n'
+
+    with open(results_path, 'w') as f:
+        f.write(results)

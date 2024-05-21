@@ -75,7 +75,7 @@ def main():
     
     print("Top-1 accuracy POST: {:.2f}".format(results[0]))
     print("Top-5 accuracy POST: {:.2f}".format(results[1]))
-    report("report.txt", results[0], results[1])
+    report( results[0], results[1])
     
 if __name__ == '__main__':
     main()
