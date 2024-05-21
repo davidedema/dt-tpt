@@ -15,6 +15,7 @@ def main():
     # parameters
     n_ctx = 4
     lr = 1e-4
+    number_augmentations = 64
     model = OurCLIP(wordnet_classes.values(), n_ctx, "", "end")
     
     if PRETRAINED:
@@ -60,7 +61,7 @@ def main():
     preprocess = transforms.Compose([
         transforms.ToTensor(),
         normalize])
-    preprocess_transform = AugMixAugmenter(base_transform, preprocess, n_views=batch_size-1, 
+    preprocess_transform = AugMixAugmenter(base_transform, preprocess, n_views=number_augmentations-1, 
                                     augmix=False)
     classnames = wordnet_classes.values()
     # label_mask = imagenet_a_mask
