@@ -153,9 +153,9 @@ def validate(val_loader, model, criterion, args, output_mask=None):
 
     return top1.avg    
         
-def calculate_entropy(tensor_top_prob, top=4):
+def calculate_entropy(tensor_top_prob, top=0.1):
     entropy = - (tensor_top_prob.softmax(-1) * tensor_top_prob.log_softmax(-1)).sum(-1)
-    idx = torch.argsort(entropy, descending=False)[:top]
+    idx = torch.argsort(entropy, descending=False)[:int(entropy.size()[0] * top)]
     return tensor_top_prob[idx], idx
 
 def test_time_tuning(model, inputs, optimizer, scaler):
@@ -193,8 +193,6 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
         
     # end = time.time()
     
-    top1_pre = []
-    top5_pre = []
     top1_post = []
     top5_post = []
     for i, (images, y) in enumerate(validation_loader):
@@ -207,13 +205,7 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
         else:
             pprint("Error!!!")
         images = torch.cat(images, dim=0)
-        # print("----BEFORE TTA----")
         
-        # acc1_pre, acc5_pre = validate_single(image, y, model)
-        # top1_pre.append(acc1_pre[0])
-        # top5_pre.append(acc5_pre[0])
-        # print("TOP1: ", acc1_pre[0])
-        # print("TOP5: ", acc5_pre[0])
         print("----AFTER TTA----")
         
         if TTA_STEP > 0:
@@ -232,8 +224,6 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
         top5_post.append(acc5[0])
         top1.update(acc1[0], images.size(0))
         top5.update(acc5[0], images.size(0))
-        # print("TOP1: ", acc1[0])
-        # print("TOP5: ", acc5[0])
 
         # measure elapsed time
         progress.display_summary()

@@ -15,7 +15,7 @@ def main():
     # parameters
     n_ctx = 4
     lr = 1e-4
-    number_augmentations = 64
+    number_augmentations = 64 # aug + 1
     model = OurCLIP(wordnet_classes.values(), n_ctx, "", "end")
     
     if PRETRAINED:
