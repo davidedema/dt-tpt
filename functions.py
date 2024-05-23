@@ -193,9 +193,7 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
         model.reset()
         
     # end = time.time()
-    
-    top1_post = []
-    top5_post = []
+
     for i, (images, y) in enumerate(validation_loader):
         # print("STEP: ", i)
         assert GPU is not None
@@ -221,8 +219,7 @@ def test_time_adaptation(validation_loader, model, model_state, optimizer, optim
                 output = model(image)
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, y, topk=(1, 5))
-        top1_post.append(acc1[0])
-        top5_post.append(acc5[0])
+
         top1.update(acc1[0], images.size(0))
         top5.update(acc5[0], images.size(0))
 

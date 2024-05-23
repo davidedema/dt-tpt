@@ -19,7 +19,7 @@ def main():
     n_ctx = 4
     lr = 1e-4
     number_augmentations = 64 # aug + 1
-    model = OurCLIP(imagenet_classes, n_ctx, "", "end")
+    model = OurCLIP(imagenet_classes, n_ctx, None, "end")
     
     if PRETRAINED:
         # pretrained_ctx = torch.load(PATH_WEIGHTS)
