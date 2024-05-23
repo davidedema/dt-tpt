@@ -1,11 +1,37 @@
-from torch import nn
-import torch
-from clip.simple_tokenizer import SimpleTokenizer
-from clip import tokenize, load
-import clip
+from typing import List, Tuple
 
-_tokenizer = SimpleTokenizer()
-ARCHITECTURE = "RN50"
+import torch
+import torch.nn as nn
+
+from clip import load, tokenize
+from .simple_tokenizer import SimpleTokenizer as _Tokenizer
+from data.imagnet_prompts import imagenet_classes
+from data.fewshot_datasets import fewshot_datasets
+from data.cls_to_names import *
+
+_tokenizer = _Tokenizer()
+
+DOWNLOAD_ROOT='~/.cache/clip'
+
+class ClipImageEncoder(nn.Module):
+    def __init__(self, device, arch="ViT-L/14", image_resolution=224, n_class=1000):
+        super(ClipImageEncoder, self).__init__()
+        clip, embed_dim, _ = load(arch, device=device, download_root=DOWNLOAD_ROOT)
+        self.encoder = clip.visual
+        del clip.transformer
+        torch.cuda.empty_cache()
+        
+        self.cls_head = nn.Linear(embed_dim, n_class)
+    
+    @property
+    def dtype(self):
+        return self.encoder.conv1.weight.dtype
+
+    def forward(self, image):
+        x = self.encoder(image.type(self.dtype))
+        output = self.cls_head(x)
+        return output
+
 
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
@@ -14,20 +40,21 @@ class TextEncoder(nn.Module):
         self.positional_embedding = clip_model.positional_embedding
         self.ln_final = clip_model.ln_final
         self.text_projection = clip_model.text_projection
+        self.dtype = clip_model.dtype
 
     def forward(self, prompts, tokenized_prompts):
-        
-        x = prompts + self.positional_embedding
-        x = x.permute(1, 0, 2)  # [batch_size, n_ctx, transformer.width] -> [n_ctx, batch_size, transformer.width]
+        x = prompts + self.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # [n_ctx, batch_size, transformer.width] -> [batch_size, n_ctx, transformer.width]
-        x = self.ln_final(x)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = self.ln_final(x).type(self.dtype)
 
-        # Take features from the eot embedding (eot_token is the highest number in each sequence)
+        # x.shape = [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
 
         return x
-    
+
 
 class PromptLearner(nn.Module):
     def __init__(self, clip_model, classnames, batch_size=None, n_ctx=16, ctx_init=None, ctx_position='end', learned_cls=False):
@@ -40,6 +67,8 @@ class PromptLearner(nn.Module):
         ctx_dim = clip_model.ln_final.weight.shape[0]
         self.ctx_dim = ctx_dim
         self.batch_size = batch_size
+
+        # self.ctx, prompt_prefix = self.reset_prompt(ctx_dim, ctx_init, clip_model)
 
         if ctx_init:
             # use given words to initialize context vectors
@@ -119,7 +148,7 @@ class PromptLearner(nn.Module):
             cls_vectors = self.cls_init_state
             self.cls.copy_(cls_vectors)
 
-    def reset_classnames(self, classnames):
+    def reset_classnames(self, classnames, arch):
         self.n_cls = len(classnames)
         if not self.learned_cls:
             classnames = [name.replace("_", " ") for name in classnames]
@@ -136,7 +165,7 @@ class PromptLearner(nn.Module):
             self.cls_init_state = cls_vectors.detach().clone()
         tokenized_prompts = torch.cat([tokenize(p) for p in prompts]).to(self.device)
 
-        clip, _, _= load(ARCHITECTURE)
+        clip, _, _ = load(arch, device=self.device, download_root=DOWNLOAD_ROOT)
 
         with torch.no_grad():
             embedding = clip.token_embedding(tokenized_prompts).type(self.dtype)
@@ -240,36 +269,76 @@ class PromptLearner(nn.Module):
             raise ValueError
 
         return prompts
-    
-class OurCLIP(nn.Module):
-    def __init__(self, classnames, n_ctx, ctx_init, class_token_position="end"):
-        super().__init__()
-        clip_model, _, _ = clip.load("RN50")
-        # clip_model = clip_model.cpu()
-        clip_model = clip_model.float()
-        self.prompt_learner = PromptLearner(clip_model, classnames, n_ctx=n_ctx, ctx_init=ctx_init, ctx_position=class_token_position)
-        self.tokenized_prompts = self.prompt_learner.tokenized_prompts
-        self.image_encoder = clip_model.visual
-        self.text_encoder = TextEncoder(clip_model)
-        self.logit_scale = clip_model.logit_scale
 
-    def forward(self, image):
-        image_features = self.image_encoder(image)
+
+class ClipTestTimeTuning(nn.Module):
+    def __init__(self, device, classnames, batch_size, criterion='cosine', arch="ViT-L/14",
+                        n_ctx=16, ctx_init=None, ctx_position='end', learned_cls=False):
+        super(ClipTestTimeTuning, self).__init__()
+        clip, _, _ = load(arch, device=device, download_root=DOWNLOAD_ROOT)
+        self.image_encoder = clip.visual
+        self.text_encoder = TextEncoder(clip)
+        self.logit_scale = clip.logit_scale.data
+        # prompt tuning
+        self.prompt_learner = PromptLearner(clip, classnames, batch_size, n_ctx, ctx_init, ctx_position, learned_cls)
+        self.criterion = criterion
+        
+    @property
+    def dtype(self):
+        return self.image_encoder.conv1.weight.dtype
+
+    # restore the initial state of the prompt_learner (tunable prompt)
+    def reset(self):
+        self.prompt_learner.reset()
+
+    def reset_classnames(self, classnames, arch):
+        self.prompt_learner.reset_classnames(classnames, arch)
+
+    def get_text_features(self):
+        text_features = []
         prompts = self.prompt_learner()
         tokenized_prompts = self.prompt_learner.tokenized_prompts
-        
-        text_features = self.text_encoder(prompts, tokenized_prompts)
+        t_features = self.text_encoder(prompts, tokenized_prompts)
+        text_features.append(t_features / t_features.norm(dim=-1, keepdim=True))
+        text_features = torch.stack(text_features, dim=0)
 
+        return torch.mean(text_features, dim=0)
+
+    def inference(self, image):
+        with torch.no_grad():
+            image_features = self.image_encoder(image.type(self.dtype))
+
+        text_features = self.get_text_features()
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
+        
         logit_scale = self.logit_scale.exp()
         logits = logit_scale * image_features @ text_features.t()
 
         return logits
-    
-    def reset_classnames(self, classnames):
-        self.prompt_learner.reset_classnames(classnames)
-        
-    def reset(self):
-        self.prompt_learner.reset()
+
+    def forward(self, input):
+        if isinstance(input, Tuple):
+            view_0, view_1, view_2 = input
+            return self.contrast_prompt_tuning(view_0, view_1, view_2)
+        elif len(input.size()) == 2:
+            return self.directional_prompt_tuning(input)
+        else:
+            return self.inference(input)
+
+
+def get_coop(clip_arch, test_set, device, n_ctx, ctx_init, learned_cls=False):
+    if test_set in fewshot_datasets:
+        classnames = eval("{}_classes".format(test_set.lower()))
+    elif test_set == 'bongard':
+        if learned_cls:
+            classnames = ['X', 'X']
+        else:
+            classnames = ['True', 'False']
+    else:
+        classnames = imagenet_classes
+
+    model = ClipTestTimeTuning(device, classnames, None, arch=clip_arch,
+                            n_ctx=n_ctx, ctx_init=ctx_init, learned_cls=learned_cls)
+
+    return model
+
