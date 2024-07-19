@@ -1,235 +1,158 @@
-import random
+import time
+
+import math
+
+from PIL import Image
 import numpy as np
-from enum import Enum
+
 import torch
-from pprint import pprint
-import os
-from os import listdir
+import torch.nn.parallel
+import torch.optim
+import torch.utils.data
+import torch.utils.data.distributed
+from torchvision import transforms
+from flags import *
 
-ARCHITECTURE = "RN50"
+from model import *
 
-DEVICE = "cuda:0"
-GPU = 0
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
 
-CLIP_RESOLUTION = 224
-TTA_STEP = 1
+try:
+    from torchvision.transforms import InterpolationMode
+    BICUBIC = InterpolationMode.BICUBIC
+except ImportError:
+    BICUBIC = Image.BICUBIC
+import torchvision.models as models
 
-def set_random_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+from data.imagnet_prompts import imagenet_classes
+from utils.tools import Summary, AverageMeter, ProgressMeter, accuracy
+from data.cls_to_names import *
+from data.fewshot_datasets import fewshot_datasets
+from data.imagenet_variants import thousand_k_to_200, imagenet_a_mask, imagenet_r_mask, imagenet_v_mask
 
-class Summary(Enum):
-    NONE = 0
-    AVERAGE = 1
-    SUM = 2
-    COUNT = 3
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-    def __init__(self, name, fmt=':f', summary_type=Summary.AVERAGE):
-        self.name = name
-        self.fmt = fmt
-        self.summary_type = summary_type
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-    def __str__(self):
-        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
-        return fmtstr.format(**self.__dict__)
+# fits a polynomial regression model to the input data.
+def polynomial_regression(x, y, degree=2):
+    """
+    Parameters:
+        x (array-like): The input data (independent variable).
+        y (array-like): The target data (dependent variable).
+        degree (int): The degree of the polynomial regression model.
     
-    def summary(self):
-        fmtstr = ''
-        if self.summary_type is Summary.NONE:
-            fmtstr = ''
-        elif self.summary_type is Summary.AVERAGE:
-            fmtstr = '{name} {avg:.3f}'
-        elif self.summary_type is Summary.SUM:
-            fmtstr = '{name} {sum:.3f}'
-        elif self.summary_type is Summary.COUNT:
-            fmtstr = '{name} {count:.3f}'
-        else:
-            raise ValueError('invalid summary type %r' % self.summary_type)
-        
-        return fmtstr.format(**self.__dict__)
+    Returns:
+        model (LinearRegression): The trained polynomial regression model.
+        poly_features (PolynomialFeatures): The polynomial features transformer.
+    """
 
-
-class ProgressMeter(object):
-    def __init__(self, num_batches, meters, prefix=""):
-        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
-        self.meters = meters
-        self.prefix = prefix
-
-    def display(self, batch):
-        entries = [self.prefix + self.batch_fmtstr.format(batch)]
-        entries += [str(meter) for meter in self.meters]
-        print('\t'.join(entries))
-        
-    def display_summary(self):
-        entries = [" *"]
-        entries += [meter.summary() for meter in self.meters]
-        print(' '.join(entries))
-
-    def _get_batch_fmtstr(self, num_batches):
-        num_digits = len(str(num_batches // 1))
-        fmt = '{:' + str(num_digits) + 'd}'
-        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
-
-
-def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
-
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-        res = []
-        for k in topk:
-            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
-
-def validate_single(sample, y, model):
+    x = np.array(x).reshape(-1, 1) # reshape x for sklearn
+    y = np.array(y)
     
-    model.eval()
-    with torch.no_grad():
-        with torch.cuda.amp.autocast():
-            output = model(sample)
-    y = y.cuda(GPU, non_blocking=True)
-    acc1, acc5 = accuracy(output, y, topk=(1, 5))
+    poly_features = PolynomialFeatures(degree=degree)
+    x_poly = poly_features.fit_transform(x)
     
-    return acc1, acc5     
+    model = LinearRegression() # fit the polynomial regression model
+    model.fit(x_poly, y)
+    
+    return model, poly_features
 
-def validate(val_loader, model, criterion, args, output_mask=None):
-    batch_time = AverageMeter('Time', ':6.3f', Summary.NONE)
-    losses = AverageMeter('Loss', ':.4e', Summary.NONE)
-    top1 = AverageMeter('Acc@1', ':6.2f', Summary.AVERAGE)
-    top5 = AverageMeter('Acc@5', ':6.2f', Summary.AVERAGE)
-    progress = ProgressMeter(
-        len(val_loader),
-        [batch_time, losses, top1, top5],
-        prefix='Test: ')
+# computes the derivative of a polynomial given its coefficients.
+def polynomial_derivative(coefficients):
+    """  
+    Parameters: coefficients (array-like): The coefficients of the polynomial.
+    Returns: derivative_coefficients (array-like): The coefficients of the derivative polynomial.
+    """
 
-    # switch to evaluate mode
-    model.eval()
+    degree = len(coefficients) - 1
+    derivative_coefficients = np.array([coefficients[i] * (degree - i) for i in range(degree)])
+    return derivative_coefficients
 
-    with torch.no_grad():
-        for i, (images, target) in enumerate(val_loader):
-            if GPU is not None:
-                images = images.cuda(GPU, non_blocking=True)
-            if torch.cuda.is_available():
-                target = target.cuda(GPU, non_blocking=True)
+# evaluates a polynomial at given points x.
+def evaluate_polynomial(coefficients, x):
+    """
+    Parameters:
+        coefficients (array-like): The coefficients of the polynomial.
+        x (array-like): The points at which to evaluate the polynomial.
+    
+    Returns: y (array-like) - the values of the polynomial at the given points.
+    """
+    y = np.polyval(coefficients, x)
+    return y
 
-            # compute output
-            with torch.cuda.amp.autocast():
-                output = model(images)
-                if output_mask:
-                    output = output[:, output_mask]
-                loss = criterion(output, target)
 
-            # measure accuracy and record loss
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            losses.update(loss.item(), images.size(0))
-            top1.update(acc1[0], images.size(0))
-            top5.update(acc5[0], images.size(0))
+def find_max_threashold(sorted_entropies):
 
-            if i % 200 == 0:
-                progress.display(i)
-        progress.display_summary()
+    degree = 7
+    model, poly_features = polynomial_regression(range(len(sorted_entropies)), sorted_entropies, degree)
 
-    return top1.avg    
-        
-def calculate_entropy(tensor_top_prob, top=0.1):
-    entropy = - (tensor_top_prob.softmax(-1) * tensor_top_prob.log_softmax(-1)).sum(-1)
-    idx = torch.argsort(entropy, descending=False)[:int(entropy.size()[0] * top)]
-    return tensor_top_prob[idx], idx
+    x_new = np.linspace(0, len(sorted_entropies), 100)
+    x_new = x_new.reshape(-1, 1)
+    y_new = model.predict(poly_features.fit_transform(x_new))
+    coefficients = np.polyfit(range(len(x_new)), y_new, degree)
+    derivative_coefficients = polynomial_derivative(coefficients)
 
-def test_time_tuning(model, inputs, optimizer, scaler):
-    selected_idx = None
-    for j in range(TTA_STEP):
-        with torch.cuda.amp.autocast():
-            output = model(inputs) 
+    # evaluate the derivative at the new data points
+    y_derivative = evaluate_polynomial(derivative_coefficients, x_new.flatten())    
 
-            if selected_idx is not None:
-                output = output[selected_idx]
-            else:
-                output, selected_idx = calculate_entropy(output, 0.1)
-
-            loss = avg_entropy(output)
-        
-        optimizer.zero_grad()
-        # compute gradient and do SGD step
-        scaler.scale(loss).backward()
-        # Unscales the gradients of optimizer's assigned params in-place
-        scaler.step(optimizer)
-        scaler.update()
-
-def test_time_adaptation(validation_loader, model, model_state, optimizer, optim_state, scaler):
-    batch_time = AverageMeter('Time', ':6.3f', Summary.NONE)
-    losses = AverageMeter('Loss', ':.4e', Summary.NONE)
-    top1 = AverageMeter('Acc@1', ':6.2f', Summary.AVERAGE)
-    top5 = AverageMeter('Acc@5', ':6.2f', Summary.AVERAGE)
-    progress = ProgressMeter(
-        len(validation_loader),
-        [batch_time, losses, top1, top5],
-        prefix='Test: ')
-    model.eval()
-    with torch.no_grad():
-        model.reset()
-        
-    # end = time.time()
-
-    for i, (images, y) in enumerate(validation_loader):
-        # print("STEP: ", i)
-        assert GPU is not None
-        if isinstance(images, list):
-            for k in range(len(images)):
-                images[k] = images[k].cuda(GPU, non_blocking=True)
-            image = images[0]
-        else:
-            pprint("Error!!!")
-        images = torch.cat(images, dim=0)
-        y = y.cuda(GPU, non_blocking=True)
-        
-        # print("----AFTER TTA----")
-        
-        if TTA_STEP > 0:
-            with torch.no_grad():
-                model.reset()
-        optimizer.load_state_dict(optim_state)
-        test_time_tuning(model, images, optimizer, scaler)  # Calcolo loss + backpropagation
+    stazionario = 0
+    ascending = (y_derivative[1] - y_derivative[0]) > 0
+    for i in range(len(y_derivative)-1):
+        if ascending :
+            if y_derivative[i+1] < y_derivative[i]:
+                stazionario = int(x_new[i][0])
+                break
+        else :
+            if y_derivative[i+1] > y_derivative[i]:
+                stazionario = int(x_new[i][0])
+                break
             
-        with torch.no_grad():
-            with torch.cuda.amp.autocast():
-                output = model(image)
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, y, topk=(1, 5))
+            
+    return stazionario
 
-        top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
 
-        # measure elapsed time
-        progress.display(i)
-    progress.display_summary()
+def select_confident_samples_ours(logits):
+    
+    batch_entropy = -(logits.softmax(1) * logits.log_softmax(1)).sum(1)
+    i = 0
 
-    return [top1.avg, top5.avg]
+    '''
+    for histogram in logits_list:
+        row_to_save = [bathc_entropy_list[i]]
+        row_to_save.append(histogram)
+        i += 1 
+    '''
 
-# Their implementation
+    #compute the fn of the sorted_indices, find the derivativies and the minimun/maximum (first occurence)
+    min_threshold = TRESHOLD
+    sorted_entropy = sorted(batch_entropy.tolist())
+    max_threshold = find_max_threashold(sorted_entropy)
+
+    min_loss = math.inf
+    n_chosen = TRESHOLD
+    
+    idx = torch.argsort(batch_entropy, descending=False)[:min_threshold]
+    
+    loss = avg_entropy(logits[idx])
+    
+    for i in range(min_threshold+1, max_threshold): #0.1 - 0.2
+        n = i
+        idx = torch.argsort(batch_entropy, descending=False)[:n]
+        loss = avg_entropy(logits[idx])
+        if loss < min_loss:
+            min_loss = loss
+            n_chosen = n
+    
+    #print('n: ', n_chosen)
+
+    idx = torch.argsort(batch_entropy, descending=False)[:n_chosen]
+
+    # return logits[idx], idx, loss, min_threashold, weighted_avg
+    return logits[idx], idx, loss
+
+def select_confident_samples(logits, top):
+    batch_entropy = -(logits.softmax(1) * logits.log_softmax(1)).sum(1)
+    idx = torch.argsort(batch_entropy, descending=False)[:int(batch_entropy.size()[0] * top)]
+    return logits[idx], idx
+
 def avg_entropy(outputs):
     logits = outputs - outputs.logsumexp(dim=-1, keepdim=True) # logits = outputs.log_softmax(dim=1) [N, 1000]
     avg_logits = logits.logsumexp(dim=0) - np.log(logits.shape[0]) # avg_logits = logits.mean(0) [1, 1000]
@@ -238,21 +161,116 @@ def avg_entropy(outputs):
     return -(avg_logits * torch.exp(avg_logits)).sum(dim=-1)
 
 
-def report(avgtop1, avgtop5):
+def test_time_tuning(model, inputs, optimizer, scaler):
+    
+    selected_idx = None
+    for j in range(TTA_STEPS):
+        with torch.cuda.amp.autocast():
+            
+            output = model(inputs) 
 
-    results_dir = 'reports'
-    test_folder_name = 'test0'
-    i = 0
-    while os.path.exists(os.path.join(results_dir, test_folder_name)):
-        i += 1
-        test_folder_name = f'test{i}'
+            if OUR_SELECTION:
+                if selected_idx is not None:
+                    output = output[selected_idx]
+                    loss = avg_entropy(output)
+                else:
+                    output, selected_idx, loss = select_confident_samples_ours(output)
+            
+            else:
+                if selected_idx is not None:
+                    output = output[selected_idx]
+                else:
+                    output, selected_idx = select_confident_samples(output, SELECTION_P)
 
-    new_test_dir = os.path.join(results_dir, test_folder_name)
-    os.makedirs(new_test_dir)
+                loss = avg_entropy(output)
+        
+        optimizer.zero_grad()
+        # compute gradient and do SGD step
+        scaler.scale(loss).backward()
+        # Unscales the gradients of optimizer's assigned params in-place
+        scaler.step(optimizer)
+        scaler.update()
+        
+    return
 
-    results_path = os.path.join(new_test_dir, 'report.txt')
 
-    results = f'Average top 1: {avgtop1} \n' + f'Average top 5: {avgtop5} \n'
+def test_time_adapt_eval(val_loader, model, optimizer, optim_state, scaler):
+    batch_time = AverageMeter('Time', ':6.3f', Summary.NONE)
+    top1 = AverageMeter('Acc@1', ':6.2f', Summary.AVERAGE)
+    top5 = AverageMeter('Acc@5', ':6.2f', Summary.AVERAGE)
 
-    with open(results_path, 'w') as f:
-        f.write(results)
+    progress = ProgressMeter(
+        len(val_loader),
+        [batch_time, top1, top5],
+        prefix='Test: ')
+
+    # reset model and switch to evaluate mode
+    model.eval()
+    
+    with torch.no_grad():
+        model.reset()
+
+    mean=[0.48145466, 0.4578275, 0.40821073]
+    std=[0.26862954, 0.26130258, 0.27577711]
+
+    # Unnormalization function
+    unnormalize = transforms.Normalize(
+        mean=[-m/s for m, s in zip(mean, std)],
+        std=[1/s for s in std]
+    )
+    
+    
+    end = time.time()
+    for i, (images, target) in enumerate(val_loader):
+        assert GPU is not None
+        
+        # for k in range(len(images)):
+        #     save_path = f'augmentations/{k}.png'
+        #     image = torch.squeeze(images[k], dim=0)
+        #     image = unnormalize(image)
+        #     image = image.permute(1, 2, 0).cpu().numpy()
+        #     image = np.squeeze(image)
+        #     image = Image.fromarray((image * 255).astype(np.uint8))
+        #     image.save(save_path)
+        
+        if isinstance(images, list):
+            for k in range(len(images)):
+                images[k] = images[k].cuda(GPU, non_blocking=True)
+            image = images[0]
+        else:
+            if len(images.size()) > 4:
+                # when using ImageNet Sampler as the dataset
+                assert images.size()[0] == 1
+                images = images.squeeze(0)
+            images = images.cuda(GPU, non_blocking=True)
+            image = images
+        target = target.cuda(GPU, non_blocking=True)
+        
+        images = torch.cat(images, dim=0)
+
+        # reset the tunable prompt to its initial state
+        
+        if TTA_STEPS > 0:
+            with torch.no_grad():
+                model.reset()
+        optimizer.load_state_dict(optim_state)
+        test_time_tuning(model, images, optimizer, scaler)
+        
+        with torch.no_grad():
+            with torch.cuda.amp.autocast():
+                output = model(image)
+        # measure accuracy and record loss
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+                
+        top1.update(acc1[0], image.size(0))
+        top5.update(acc5[0], image.size(0))
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        progress.display(i)
+
+    progress.display_summary()
+
+    return [top1.avg, top5.avg]

@@ -1,0 +1,18 @@
+SEED = 0
+GPU = 0
+N_CTX = 4
+CTX_INIT = ""
+WEIGHTS = "./model.pth.tar-50"
+ARCH = "RN50"
+LR = 5e-3
+RESOLUTION = 224
+SET = "A"
+VIEWS = 63
+DATA = "./data"
+TTA_STEPS = 1
+SELECTION_P = 0.1
+
+OUR_SELECTION = True
+TRESHOLD = 6
+
+DINO = True

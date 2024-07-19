@@ -1,7 +1,10 @@
+
+import math
 from typing import List, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from clip import load, tokenize
 from .simple_tokenizer import SimpleTokenizer as _Tokenizer

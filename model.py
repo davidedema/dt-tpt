@@ -253,8 +253,13 @@ class OurCLIP(nn.Module):
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
 
+    @property
+    def dtype(self):
+        return self.image_encoder.conv1.weight.dtype
+
     def forward(self, image):
-        image_features = self.image_encoder(image)
+        with torch.no_grad():
+            image_features = self.image_encoder(image.type(self.dtype))
         prompts = self.prompt_learner()
         tokenized_prompts = self.prompt_learner.tokenized_prompts
         

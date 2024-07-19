@@ -6,3 +6,4 @@ matplotlib
 pillow  
 scikit-image    
 ipykernel
+ftfy
