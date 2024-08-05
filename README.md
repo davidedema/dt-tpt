@@ -51,7 +51,7 @@ In order to run the project you'll need to clone it and install the requirements
 - Clone it
 
     ```BASH
-    git clone https://github.com/dttpt/
+    git clone https://github.com/dt-tpt/
 
     ```
 - Create the virtual environment where you want, activate it and install the dependencies 
